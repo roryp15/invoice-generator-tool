@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice Generator</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load html2pdf library for direct PDF export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <!-- Configure Tailwind for custom styles and Inter font -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc; /* Slate 50 background */
+            min-height: 100vh;
+        }
+        /* Style to make input/textarea fields look like static text in the PDF */
+        .pdf-static-text {
+            border-color: transparent !important;
+            box-shadow: none !important;
+            background-color: transparent !important;
+            outline: none !important;
+            padding: 0 !important; /* Ensure content is flush */
+        }
+
+        /* Styles for the temporary static address div to match the original textarea */
+        .address-static {
+            line-height: 1.4; /* Improve readability */
+        }
+
+        /* The @media print block is kept primarily for user's use of print() function, 
+           but html2pdf.js relies on JavaScript for display manipulation. */
+        @media print {
+            .no-print {
+                display: none !important;
+            }
+            /* Ensure inputs are clean if browser print is used */
+            input:focus, textarea:focus, select:focus, input, textarea {
+                outline: none;
+                border: none;
+                box-shadow: none;
+                padding: 0;
+            }
+        }
+    </style>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables must be defined before they are used in the module or other scripts
+        window.firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-invoice-app';
+        window.initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false;
+
+        setLogLevel('Debug');
+
+        async function initializeFirebase() {
+            if (Object.keys(window.firebaseConfig).length === 0) {
+                console.error("Firebase configuration is missing. Cannot initialize Firestore.");
+                return;
+            }
+
+            const app = initializeApp(window.firebaseConfig);
+            window.db = getFirestore(app);
+            window.auth = getAuth(app);
+
+            onAuthStateChanged(window.auth, async (user) => {
+                if (user) {
+                    window.userId = user.uid;
+                } else {
+                    if (window.initialAuthToken) {
+                        try {
+                            await signInWithCustomToken(window.auth, window.initialAuthToken);
+                        } catch (error) {
+                            console.error("Custom token sign-in failed:", error);
+                            await signInAnonymously(window.auth);
+                        }
+                    } else {
+                        await signInAnonymously(window.auth);
+                    }
+                    window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
+                }
+
+                window.isAuthReady = true;
+                console.log("Firebase Auth Ready. User ID:", window.userId);
+
+                // Now that we are authenticated, load the invoice
+                if (typeof window.loadInvoice === 'function') {
+                    window.loadInvoice();
+                }
+            });
+        }
+
+        initializeFirebase();
+
+        window.getInvoiceDocRef = () => {
+            if (!window.db || !window.userId) return null;
+            // Private Data Path: /artifacts/{appId}/users/{userId}/invoices/latest
+            return doc(window.db, 'artifacts', window.appId, 'users', window.userId, 'invoices', 'latest');
+        };
+
+        window.saveInvoice = async (invoiceData) => {
+            if (!window.isAuthReady || !window.db) {
+                console.warn("Firebase not ready for saving.");
+                return;
+            }
+            try {
+                const docRef = window.getInvoiceDocRef();
+                if (docRef) {
+                    await setDoc(docRef, invoiceData);
+                    document.getElementById('saveStatus').textContent = 'Saved!';
+                    setTimeout(() => document.getElementById('saveStatus').textContent = '', 3000);
+                }
+            } catch (e) {
+                console.error("Error saving document: ", e);
+                document.getElementById('saveStatus').textContent = 'Save Failed!';
+            }
+        };
+
+        window.loadInvoice = async () => {
+            if (!window.isAuthReady || !window.db) {
+                console.warn("Firebase not ready for loading.");
+                return;
+            }
+            try {
+                const docRef = window.getInvoiceDocRef();
+                if (docRef) {
+                    const docSnap = await getDoc(docRef);
+
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        console.log("Document data loaded:", data);
+                        window.appState.load(data);
+                    } else {
+                        console.log("No saved invoice found. Starting new invoice.");
+                    }
+                }
+            } catch (e) {
+                console.error("Error loading document: ", e);
+            }
+        };
+
+    </script>
+</head>
+<body class="p-4 md:p-8">
+
+    <div id="app-container" class="max-w-4xl mx-auto py-6 md:py-12">
+        <!-- Action Buttons -->
+        <div class="mb-6 no-print">
+            <!-- Loading indicator for PDF generation -->
+            <div id="pdfLoading" class="text-sm font-medium rounded-lg mb-3 hidden p-3 bg-blue-100 text-blue-800 border border-blue-300">
+                Generating PDF... Please wait.
+            </div>
+
+            <div class="flex justify-between items-center">
+                <div class="text-xs text-gray-500 italic flex items-center">
+                    User ID: <span id="displayUserId" class="ml-1 font-mono text-xs">Loading...</span>
+                </div>
+                <div class="flex space-x-3">
+                    <span id="saveStatus" class="text-sm text-green-600 self-center"></span>
+                    <button onclick="window.saveInvoice(window.appState.getData())" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md">
+                        Save Draft
+                    </button>
+                    <button id="downloadPdfButton" onclick="handlePdfExport()" class="bg-white hover:bg-gray-100 text-gray-800 font-semibold py-2 px-4 rounded-lg border border-gray-300 shadow-md">
+                        Download/Export PDF
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="invoice-card" class="bg-white p-6 md:p-10 rounded-xl shadow-2xl border border-gray-100">
+
+            <!-- Header -->
+            <div class="flex justify-between items-start mb-10 border-b pb-4">
+                <div>
+                    <h1 class="text-4xl font-extrabold text-gray-900">INVOICE</h1>
+                    <input id="invoiceNumber" type="text" placeholder="INV-001" class="text-xl font-medium text-indigo-600 mt-2 p-1 focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200" style="width: 150px;">
+                </div>
+                <div class="text-right">
+                    <input id="invoiceTitle" type="text" placeholder="[Your Company Name]" class="text-2xl font-bold text-gray-800 p-1 mb-1 focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200 w-full text-right" style="min-width: 250px;">
+                    <textarea id="invoiceAddress" rows="3" placeholder="Your Address Line 1&#10;City, Postcode&#10;Email: your.email@example.com" class="text-sm text-gray-600 p-1 w-full resize-none focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200 text-right"></textarea>
+                </div>
+            </div>
+
+            <!-- Client & Date -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
+                <div>
+                    <p class="uppercase text-xs font-semibold text-gray-500 mb-2">Billed To:</p>
+                    <input id="clientName" type="text" placeholder="Client Name" class="text-lg font-semibold text-gray-800 p-1 focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200 w-full mb-1">
+                    <textarea id="clientAddress" rows="3" placeholder="Client Address Line 1&#10;City, Postcode&#10;Tax ID/VAT Number" class="text-sm text-gray-600 p-1 w-full resize-none focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200"></textarea>
+                </div>
+                <div class="md:text-right">
+                    <div class="mb-2">
+                        <span class="text-sm font-medium text-gray-600 mr-2">Invoice Date:</span>
+                        <input id="invoiceDate" type="date" class="text-sm font-semibold text-gray-800 p-1 focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200">
+                    </div>
+                    <div>
+                        <span class="text-sm font-medium text-gray-600 mr-2">Due Date:</span>
+                        <input id="dueDate" type="date" class="text-sm font-semibold text-gray-800 p-1 focus:ring-0 focus:outline-none focus:border-indigo-500 border-b border-gray-200">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Line Items Table -->
+            <div class="mb-8">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead>
+                        <tr class="bg-gray-50">
+                            <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/2">Description</th>
+                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Qty</th>
+                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Unit Price</th>
+                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Total</th>
+                            <th class="no-print w-10"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="itemTableBody" class="bg-white divide-y divide-gray-100">
+                        <!-- Items rendered here by JS -->
+                    </tbody>
+                </table>
+                <button onclick="window.appState.addItem()" class="mt-4 no-print text-indigo-600 hover:text-indigo-800 text-sm font-semibold flex items-center">
+                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
+                    Add Item
+                </button>
+            </div>
+
+            <!-- Summary & Notes -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <!-- Notes / Payment Terms -->
+                <div class="md:col-span-2">
+                    <p class="uppercase text-xs font-semibold text-gray-500 mb-2">Notes / Payment Terms</p>
+                    <textarea id="notes" rows="4" placeholder="E.g., Payment due within 30 days. Thank you for your business!" class="w-full text-sm text-gray-700 p-2 border border-gray-200 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 resize-none"></textarea>
+                </div>
+                <!-- Summary -->
+                <div class="md:col-span-1">
+                    <div class="space-y-2">
+                        <div class="flex justify-between">
+                            <span class="text-gray-600">Subtotal:</span>
+                            <span id="subtotal" class="font-medium text-gray-800">$0.00</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600">Tax Rate (%):</span>
+                            <input id="taxRate" type="number" min="0" max="100" value="0" class="text-right text-sm font-medium text-gray-800 p-1 border border-gray-200 rounded-md focus:ring-indigo-500 focus:border-indigo-500" style="width: 60px;">
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600">Tax Amount:</span>
+                            <span id="taxAmount" class="font-medium text-gray-800">$0.00</span>
+                        </div>
+                        <div class="flex justify-between pt-4 border-t border-gray-300">
+                            <span class="text-xl font-bold text-gray-900">Grand Total:</span>
+                            <span id="grandTotal" class="text-xl font-bold text-indigo-600">$0.00</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-10 pt-6 border-t border-gray-100 text-center text-sm text-gray-500">
+                Generated with a simple online tool.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Set the default date for the invoice
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('invoiceDate').value = today;
+
+        // Global variable to store replaced address elements for restoration
+        let replacedElements = [];
+
+        // Function to replace a dynamic textarea with static, line-break-aware text for PDF
+        function makeStaticForPDF(elementId) {
+            const originalEl = document.getElementById(elementId);
+            if (!originalEl || originalEl.tagName !== 'TEXTAREA') return;
+
+            const textValue = originalEl.value;
+            
+            // 1. Create a static div element
+            const staticEl = document.createElement('div');
+            
+            // 2. Convert newlines (\n) to HTML break tags (<br>) for proper PDF rendering
+            staticEl.innerHTML = textValue.replace(/\n/g, '<br>');
+            
+            // 3. Apply necessary styles (match the original classes but add 'address-static' for fine-tuning)
+            staticEl.className = originalEl.className.replace('resize-none', '').split(' ').filter(c => c !== 'pdf-static-text').join(' ') + ' address-static';
+            staticEl.id = originalEl.id; // Keep the ID for reference
+            
+            // 4. Replace in the DOM
+            originalEl.parentNode.replaceChild(staticEl, originalEl);
+            
+            // 5. Store the original element and its replacement for restoration
+            replacedElements.push({
+                original: originalEl,
+                static: staticEl
+            });
+        }
+        
+        // Function to restore the original textareas
+        function restoreInputsFromPDF() {
+            replacedElements.forEach(item => {
+                // Restore the original element by replacing the temporary static one
+                if (item.static.parentNode) {
+                    item.static.parentNode.replaceChild(item.original, item.static);
+                }
+            });
+            replacedElements = []; // Clear the list
+        }
+
+        // --- Application State and Logic ---
+        window.appState = {
+            data: {
+                invoiceNumber: 'INV-001',
+                invoiceDate: today,
+                dueDate: today,
+                taxRate: 0,
+                invoiceTitle: '[Your Company Name]',
+                invoiceAddress: "Your Address Line 1\nCity, Postcode\nEmail: your.email@example.com",
+                clientName: 'Client Name',
+                clientAddress: "Client Address Line 1\nCity, Postcode\nTax ID/VAT Number",
+                notes: 'Payment due within 30 days. Thank you for your business!',
+                items: [
+                    { description: 'Service/Product 1', quantity: 1, unitPrice: 100.00 },
+                    { description: 'Service/Product 2', quantity: 2, unitPrice: 50.00 }
+                ]
+            },
+
+            // Updates the internal data model based on input changes
+            syncInputs: function() {
+                this.data.invoiceNumber = document.getElementById('invoiceNumber').value;
+                this.data.invoiceDate = document.getElementById('invoiceDate').value;
+                this.data.dueDate = document.getElementById('dueDate').value;
+                this.data.taxRate = parseFloat(document.getElementById('taxRate').value) || 0;
+                this.data.invoiceTitle = document.getElementById('invoiceTitle').value;
+                this.data.invoiceAddress = document.getElementById('invoiceAddress').value;
+                this.data.clientName = document.getElementById('clientName').value;
+                this.data.clientAddress = document.getElementById('clientAddress').value;
+                this.data.notes = document.getElementById('notes').value;
+
+                // Sync item data from the table (ensuring we capture user edits)
+                this.data.items = [];
+                document.querySelectorAll('#itemTableBody tr').forEach((row, index) => {
+                    const desc = row.querySelector('.item-description')?.value || '';
+                    const qty = parseFloat(row.querySelector('.item-quantity')?.value) || 0;
+                    const price = parseFloat(row.querySelector('.item-unit-price')?.value) || 0;
+                    if (desc || qty > 0 || price > 0) { // Only save non-empty descriptions or items with values
+                        this.data.items.push({
+                            description: desc,
+                            quantity: qty,
+                            unitPrice: price
+                        });
+                    }
+                });
+            },
+
+            // Pushes internal data model to the UI inputs
+            renderInputs: function() {
+                document.getElementById('displayUserId').textContent = window.userId || 'N/A';
+                document.getElementById('invoiceNumber').value = this.data.invoiceNumber;
+                document.getElementById('invoiceDate').value = this.data.invoiceDate;
+                document.getElementById('dueDate').value = this.data.dueDate;
+                document.getElementById('taxRate').value = this.data.taxRate;
+                document.getElementById('invoiceTitle').value = this.data.invoiceTitle;
+                document.getElementById('invoiceAddress').value = this.data.invoiceAddress;
+                document.getElementById('clientName').value = this.data.clientName;
+                document.getElementById('clientAddress').value = this.data.clientAddress;
+                document.getElementById('notes').value = this.data.notes;
+            },
+
+            // Calculates the overall subtotal, tax, and grand total
+            calculateTotals: function() {
+                this.syncInputs(); // Ensure state is up-to-date before calculating
+
+                let subtotal = this.data.items.reduce((sum, item) => {
+                    return sum + (item.quantity * item.unitPrice);
+                }, 0);
+
+                const taxRate = this.data.taxRate / 100;
+                const taxAmount = subtotal * taxRate;
+                const grandTotal = subtotal + taxAmount;
+
+                // Update display elements
+                document.getElementById('subtotal').textContent = '$' + subtotal.toFixed(2);
+                document.getElementById('taxAmount').textContent = '$' + taxAmount.toFixed(2);
+                document.getElementById('grandTotal').textContent = '$' + grandTotal.toFixed(2);
+            },
+            
+            // Updates only the line item totals and the summary totals, without re-rendering the whole table
+            updateLineTotals: function() {
+                this.syncInputs(); // Re-sync inputs to update internal data model
+
+                document.querySelectorAll('#itemTableBody tr').forEach((row, index) => {
+                    const item = this.data.items[index];
+                    if (item) {
+                        const lineTotal = item.quantity * item.unitPrice;
+                        const lineTotalSpan = row.querySelector('.line-total');
+                        if (lineTotalSpan) {
+                            lineTotalSpan.textContent = '$' + lineTotal.toFixed(2);
+                        }
+                    }
+                });
+                
+                // Update the overall summary totals
+                this.calculateTotals();
+            },
+
+            // Renders the dynamic line items table (used only for initial load, add, and remove)
+            rebuildItemTable: function() {
+                const tbody = document.getElementById('itemTableBody');
+                tbody.innerHTML = ''; // Clear existing rows
+
+                this.data.items.forEach((item, index) => {
+                    const lineTotal = item.quantity * item.unitPrice;
+
+                    const row = document.createElement('tr');
+                    row.className = 'hover:bg-gray-50 transition duration-100';
+                    row.innerHTML = `
+                        <td class="px-3 md:px-6 py-2 whitespace-nowrap">
+                            <textarea
+                                class="item-description text-sm text-gray-900 w-full p-1 border-b border-gray-100 focus:border-indigo-500 resize-none h-auto pdf-static-text"
+                                rows="1"
+                                oninput="window.appState.handleItemChange()"
+                            >${item.description}</textarea>
+                        </td>
+                        <td class="px-3 md:px-6 py-2 whitespace-nowrap text-right">
+                            <input
+                                type="number"
+                                min="0"
+                                class="item-quantity text-sm text-gray-900 w-16 text-right p-1 border-b border-gray-100 focus:border-indigo-500 pdf-static-text"
+                                value="${item.quantity.toFixed(0)}"
+                                oninput="window.appState.handleItemChange()"
+                            >
+                        </td>
+                        <td class="px-3 md:px-6 py-2 whitespace-nowrap text-right">
+                            <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                class="item-unit-price text-sm text-gray-900 w-20 text-right p-1 border-b border-gray-100 focus:border-indigo-500 pdf-static-text"
+                                value="${item.unitPrice.toFixed(2)}"
+                                oninput="window.appState.handleItemChange()"
+                            >
+                        </td>
+                        <td class="px-3 md:px-6 py-2 whitespace-nowrap text-right font-semibold text-gray-800">
+                            <span class="line-total">$${lineTotal.toFixed(2)}</span>
+                        </td>
+                        <td class="no-print text-center">
+                            <button onclick="window.appState.removeItem(${index})" class="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-50 transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                this.calculateTotals(); // Recalculate totals after rebuilding the table
+            },
+
+            // Handles changes in any item input field (fixed to only update totals)
+            handleItemChange: function() {
+                // Now we only update the totals (line item and summary), NOT the whole table structure.
+                this.updateLineTotals();
+            },
+
+            // Adds a new blank item
+            addItem: function() {
+                this.data.items.push({ description: '', quantity: 0, unitPrice: 0.00 });
+                this.rebuildItemTable();
+            },
+
+            // Removes an item by index
+            removeItem: function(index) {
+                this.data.items.splice(index, 1);
+                this.rebuildItemTable();
+            },
+
+            // Utility to get data for saving
+            getData: function() {
+                this.syncInputs();
+                return this.data;
+            },
+
+            // Utility to load data from Firestore
+            load: function(data) {
+                // Ensure the items array is loaded correctly
+                if (data.items && Array.isArray(data.items)) {
+                    // Convert stored objects back to numbers if needed (though Firestore handles this)
+                    data.items = data.items.map(item => ({
+                        description: item.description || '',
+                        quantity: parseFloat(item.quantity) || 0,
+                        unitPrice: parseFloat(item.unitPrice) || 0,
+                    }));
+                }
+                this.data = { ...this.data, ...data }; // Merge loaded data with defaults
+                this.renderInputs(); // Update static inputs
+                this.rebuildItemTable(); // Update dynamic table and calculate totals
+            }
+        };
+
+        // Global function to handle PDF export using html2pdf.js
+        window.handlePdfExport = function() {
+            const element = document.getElementById('invoice-card');
+            const loadingEl = document.getElementById('pdfLoading');
+            const downloadButton = document.getElementById('downloadPdfButton');
+
+            // 1. Prepare UI for static export: Convert addresses and style all inputs
+            const inputs = document.querySelectorAll('#invoice-card input, #invoice-card textarea');
+            const noPrintElements = document.querySelectorAll('.no-print');
+            
+            // 1a. Apply static styling to all inputs/textareas
+            inputs.forEach(input => input.classList.add('pdf-static-text'));
+            
+            // 1b. Temporarily replace multi-line textareas with static divs
+            // IMPORTANT: Sync data before replacement to ensure latest text is captured
+            window.appState.syncInputs(); 
+            makeStaticForPDF('invoiceAddress');
+            makeStaticForPDF('clientAddress');
+
+            noPrintElements.forEach(el => el.style.display = 'none');
+            downloadButton.disabled = true;
+            loadingEl.classList.remove('hidden');
+
+            // 2. Set dynamic filename
+            const invoiceNumber = document.getElementById('invoiceNumber').value || 'INVOICE';
+            const invoiceDate = document.getElementById('invoiceDate').value || new Date().toISOString().split('T')[0];
+            const filename = `${invoiceNumber}_${invoiceDate}.pdf`;
+
+            // 3. Configuration and generation
+            const opt = {
+                margin: 0.5,
+                filename: filename,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, logging: false, dpi: 192, letterRendering: true },
+                jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+            };
+
+            // 4. Generate and save
+            html2pdf().set(opt).from(element).save().then(() => {
+                console.log("PDF successfully generated and saved.");
+            }).catch(error => {
+                console.error("PDF generation failed:", error);
+            }).finally(() => {
+                // 5. Restore UI state
+                
+                // 5a. Restore original textareas
+                restoreInputsFromPDF(); 
+                
+                // 5b. Clean up static styling for all inputs/textareas
+                // We use document.querySelectorAll again because the restored textareas need the class removed.
+                document.querySelectorAll('#invoice-card input, #invoice-card textarea').forEach(input => {
+                    input.classList.remove('pdf-static-text');
+                });
+                
+                noPrintElements.forEach(el => el.style.display = '');
+                downloadButton.disabled = false;
+                loadingEl.classList.add('hidden');
+            });
+        }
+
+        // --- Event Listeners and Initialization ---
+
+        function initApp() {
+            // Add global listener to re-calculate on major input changes (outside item table)
+            const inputElements = ['invoiceNumber', 'invoiceDate', 'dueDate', 'taxRate', 'invoiceTitle', 'invoiceAddress', 'clientName', 'clientAddress', 'notes'];
+            inputElements.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.addEventListener('input', () => {
+                        // For non-item inputs, just recalculate totals
+                        window.appState.calculateTotals();
+                    });
+                }
+            });
+
+            // Initial render of the default data
+            window.appState.renderInputs();
+            window.appState.rebuildItemTable(); // Use the rebuild function for initialization
+        }
+
+        // Start the application setup
+        initApp();
+    </script>
+</body>
+</html>
