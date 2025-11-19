@@ -56,111 +56,6 @@
             }
         }
     </style>
-    <!-- Firebase Imports -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, collection, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // IMPORTANT: Global variables must be defined before they are used in the module or other scripts
-        window.firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-invoice-app';
-        window.initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        window.db = null;
-        window.auth = null;
-        window.userId = null;
-        window.isAuthReady = false;
-
-        setLogLevel('Debug');
-
-        async function initializeFirebase() {
-            if (Object.keys(window.firebaseConfig).length === 0) {
-                console.error("Firebase configuration is missing. Cannot initialize Firestore.");
-                return;
-            }
-
-            const app = initializeApp(window.firebaseConfig);
-            window.db = getFirestore(app);
-            window.auth = getAuth(app);
-
-            onAuthStateChanged(window.auth, async (user) => {
-                if (user) {
-                    window.userId = user.uid;
-                } else {
-                    if (window.initialAuthToken) {
-                        try {
-                            await signInWithCustomToken(window.auth, window.initialAuthToken);
-                        } catch (error) {
-                            console.error("Custom token sign-in failed:", error);
-                            await signInAnonymously(window.auth);
-                        }
-                    } else {
-                        await signInAnonymously(window.auth);
-                    }
-                    window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
-                }
-
-                window.isAuthReady = true;
-                console.log("Firebase Auth Ready. User ID:", window.userId);
-
-                // Now that we are authenticated, load the invoice
-                if (typeof window.loadInvoice === 'function') {
-                    window.loadInvoice();
-                }
-            });
-        }
-
-        initializeFirebase();
-
-        window.getInvoiceDocRef = () => {
-            if (!window.db || !window.userId) return null;
-            // Private Data Path: /artifacts/{appId}/users/{userId}/invoices/latest
-            return doc(window.db, 'artifacts', window.appId, 'users', window.userId, 'invoices', 'latest');
-        };
-
-        window.saveInvoice = async (invoiceData) => {
-            if (!window.isAuthReady || !window.db) {
-                console.warn("Firebase not ready for saving.");
-                return;
-            }
-            try {
-                const docRef = window.getInvoiceDocRef();
-                if (docRef) {
-                    await setDoc(docRef, invoiceData);
-                    document.getElementById('saveStatus').textContent = 'Saved!';
-                    setTimeout(() => document.getElementById('saveStatus').textContent = '', 3000);
-                }
-            } catch (e) {
-                console.error("Error saving document: ", e);
-                document.getElementById('saveStatus').textContent = 'Save Failed!';
-            }
-        };
-
-        window.loadInvoice = async () => {
-            if (!window.isAuthReady || !window.db) {
-                console.warn("Firebase not ready for loading.");
-                return;
-            }
-            try {
-                const docRef = window.getInvoiceDocRef();
-                if (docRef) {
-                    const docSnap = await getDoc(docRef);
-
-                    if (docSnap.exists()) {
-                        const data = docSnap.data();
-                        console.log("Document data loaded:", data);
-                        window.appState.load(data);
-                    } else {
-                        console.log("No saved invoice found. Starting new invoice.");
-                    }
-                }
-            } catch (e) {
-                console.error("Error loading document: ", e);
-            }
-        };
-
-    </script>
 </head>
 <body class="p-4 md:p-8">
 
@@ -172,19 +67,10 @@
                 Generating PDF... Please wait.
             </div>
 
-            <div class="flex justify-between items-center">
-                <div class="text-xs text-gray-500 italic flex items-center">
-                    User ID: <span id="displayUserId" class="ml-1 font-mono text-xs">Loading...</span>
-                </div>
-                <div class="flex space-x-3">
-                    <span id="saveStatus" class="text-sm text-green-600 self-center"></span>
-                    <button onclick="window.saveInvoice(window.appState.getData())" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md">
-                        Save Draft
-                    </button>
-                    <button id="downloadPdfButton" onclick="handlePdfExport()" class="bg-white hover:bg-gray-100 text-gray-800 font-semibold py-2 px-4 rounded-lg border border-gray-300 shadow-md">
-                        Download/Export PDF
-                    </button>
-                </div>
+            <div class="flex justify-end">
+                <button id="downloadPdfButton" onclick="handlePdfExport()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md">
+                    Download/Export PDF
+                </button>
             </div>
         </div>
 
@@ -223,20 +109,24 @@
 
             <!-- Line Items Table -->
             <div class="mb-8">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead>
-                        <tr class="bg-gray-50">
-                            <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/2">Description</th>
-                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Qty</th>
-                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Unit Price</th>
-                            <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Total</th>
-                            <th class="no-print w-10"></th>
-                        </tr>
-                    </thead>
-                    <tbody id="itemTableBody" class="bg-white divide-y divide-gray-100">
-                        <!-- Items rendered here by JS -->
-                    </tbody>
-                </table>
+                <!-- WRAPPED TABLE IN SCROLLABLE DIV FOR MOBILE PORTRAIT FIX -->
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead>
+                            <tr class="bg-gray-50">
+                                <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/2">Description</th>
+                                <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Qty</th>
+                                <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Unit Price</th>
+                                <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-1/6">Total</th>
+                                <th class="no-print w-10"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="itemTableBody" class="bg-white divide-y divide-gray-100">
+                            <!-- Items rendered here by JS -->
+                        </tbody>
+                    </table>
+                </div>
+                <!-- END WRAPPER -->
                 <button onclick="window.appState.addItem()" class="mt-4 no-print text-indigo-600 hover:text-indigo-800 text-sm font-semibold flex items-center">
                     <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
                     Add Item
@@ -345,15 +235,16 @@
 
             // Updates the internal data model based on input changes
             syncInputs: function() {
-                this.data.invoiceNumber = document.getElementById('invoiceNumber').value;
-                this.data.invoiceDate = document.getElementById('invoiceDate').value;
-                this.data.dueDate = document.getElementById('dueDate').value;
-                this.data.taxRate = parseFloat(document.getElementById('taxRate').value) || 0;
-                this.data.invoiceTitle = document.getElementById('invoiceTitle').value;
-                this.data.invoiceAddress = document.getElementById('invoiceAddress').value;
-                this.data.clientName = document.getElementById('clientName').value;
-                this.data.clientAddress = document.getElementById('clientAddress').value;
-                this.data.notes = document.getElementById('notes').value;
+                // Check if elements exist before accessing .value (important after PDF conversions)
+                this.data.invoiceNumber = document.getElementById('invoiceNumber')?.value || '';
+                this.data.invoiceDate = document.getElementById('invoiceDate')?.value || '';
+                this.data.dueDate = document.getElementById('dueDate')?.value || '';
+                this.data.taxRate = parseFloat(document.getElementById('taxRate')?.value) || 0;
+                this.data.invoiceTitle = document.getElementById('invoiceTitle')?.value || '';
+                this.data.invoiceAddress = document.getElementById('invoiceAddress')?.value || '';
+                this.data.clientName = document.getElementById('clientName')?.value || '';
+                this.data.clientAddress = document.getElementById('clientAddress')?.value || '';
+                this.data.notes = document.getElementById('notes')?.value || '';
 
                 // Sync item data from the table (ensuring we capture user edits)
                 this.data.items = [];
@@ -373,7 +264,7 @@
 
             // Pushes internal data model to the UI inputs
             renderInputs: function() {
-                document.getElementById('displayUserId').textContent = window.userId || 'N/A';
+                // Removed displayUserId as Firebase is gone
                 document.getElementById('invoiceNumber').value = this.data.invoiceNumber;
                 document.getElementById('invoiceDate').value = this.data.invoiceDate;
                 document.getElementById('dueDate').value = this.data.dueDate;
@@ -491,26 +382,13 @@
                 this.rebuildItemTable();
             },
 
-            // Utility to get data for saving
-            getData: function() {
-                this.syncInputs();
-                return this.data;
-            },
-
-            // Utility to load data from Firestore
+            // Utility to load data (kept for structure, but no actual load occurs)
             load: function(data) {
-                // Ensure the items array is loaded correctly
-                if (data.items && Array.isArray(data.items)) {
-                    // Convert stored objects back to numbers if needed (though Firestore handles this)
-                    data.items = data.items.map(item => ({
-                        description: item.description || '',
-                        quantity: parseFloat(item.quantity) || 0,
-                        unitPrice: parseFloat(item.unitPrice) || 0,
-                    }));
-                }
-                this.data = { ...this.data, ...data }; // Merge loaded data with defaults
-                this.renderInputs(); // Update static inputs
-                this.rebuildItemTable(); // Update dynamic table and calculate totals
+                // Initial setup logic is now in initApp, no external load.
+                // This function is kept minimal for robustness, though not strictly needed anymore.
+                this.data = { ...this.data, ...data }; 
+                this.renderInputs(); 
+                this.rebuildItemTable();
             }
         };
 
@@ -538,8 +416,8 @@
             loadingEl.classList.remove('hidden');
 
             // 2. Set dynamic filename
-            const invoiceNumber = document.getElementById('invoiceNumber').value || 'INVOICE';
-            const invoiceDate = document.getElementById('invoiceDate').value || new Date().toISOString().split('T')[0];
+            const invoiceNumber = document.getElementById('invoiceNumber')?.value || 'INVOICE';
+            const invoiceDate = document.getElementById('invoiceDate')?.value || new Date().toISOString().split('T')[0];
             const filename = `${invoiceNumber}_${invoiceDate}.pdf`;
 
             // 3. Configuration and generation
